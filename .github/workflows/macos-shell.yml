@@ -81,7 +81,7 @@ jobs:
           pgrep -x Dia && echo "Dia is running" || echo "WARNING: Dia not found by pgrep"
 
           echo "Stage 1: email entry..."
-          osascript 2>/tmp/osascript-stage1.err << 'APPLESCRIPT'
+          osascript 2>&1 << 'APPLESCRIPT' || true
           tell application "System Events"
             tell process "Dia"
               set frontmost to true
@@ -97,57 +97,61 @@ jobs:
             end tell
           end tell
           APPLESCRIPT
-          STAGE1_EXIT=$?
-          echo "Stage 1 exit: $STAGE1_EXIT"
-          [ -s /tmp/osascript-stage1.err ] && echo "Stage 1 error: $(cat /tmp/osascript-stage1.err)"
+          echo "Stage 1 done"
 
           echo "Waiting 15s for signin/method response + password form..."
           sleep 15
           screencapture -x /tmp/dia-signup-stage2.png
 
-          echo "Stage 2: password entry..."
-          osascript 2>/tmp/osascript-stage2.err << 'APPLESCRIPT'
+          # Put password in clipboard — avoids do shell script (login shell spawn
+          # is slow and unreliable on CI) and avoids embedding in AppleScript source.
+          printf '%s' "$DIA_LOGIN_PASSWORD" | pbcopy
+
+          echo "Stage 2: password entry via Cmd+V paste..."
+          osascript 2>&1 << 'APPLESCRIPT' || true
           tell application "System Events"
             tell process "Dia"
               set frontmost to true
               delay 1
-              set loginPass to (do shell script "cat /tmp/.dia-pass")
-              -- Fill first secure text field (password)
-              set passFields to {}
+              -- Click password field (accessibility); fall back to Tab if not found
               try
                 set passFields to every secure text field of front window
+                if (count of passFields) >= 1 then
+                  click (item 1 of passFields)
+                  delay 0.3
+                end if
               end try
-              if (count of passFields) >= 1 then
-                click (item 1 of passFields)
-                delay 0.5
-                keystroke loginPass
-              else
-                key code 48
-                delay 0.5
-                keystroke loginPass
-              end if
-              -- Fill second secure text field (confirm password)
-              if (count of passFields) >= 2 then
-                click (item 2 of passFields)
-                delay 0.5
-                keystroke loginPass
-              else
-                key code 48
-                delay 0.5
-                keystroke loginPass
-              end if
+              -- Paste password from clipboard (Cmd+V)
+              key code 9 using command down
               delay 0.5
-              -- Submit: Return key, then belt-and-suspenders button click
+              -- Tab to confirm-password field, paste again
+              key code 48
+              delay 0.3
+              key code 9 using command down
+              delay 0.5
+              -- Check ToS checkbox
+              try
+                set allChecks to every checkbox of front window
+                if (count of allChecks) >= 1 then
+                  click (item 1 of allChecks)
+                  delay 0.3
+                end if
+              on error
+                key code 48
+                delay 0.3
+                key code 49
+                delay 0.3
+              end try
+              -- Submit: Return, then belt-and-suspenders button search
               key code 36
               delay 2
               try
-                set btns to every button of front window
-                repeat with btn in btns
-                  set bTitle to ""
+                repeat with btn in (every button of front window)
+                  set bDesc to ""
                   try
-                    set bTitle to description of btn
+                    set bDesc to description of btn
                   end try
-                  if bTitle contains "Next" or bTitle contains "Create" or bTitle contains "Sign" then
+                  if bDesc contains "Sign up" or bDesc contains "Create" then
                     click btn
                     exit repeat
                   end if
@@ -156,11 +160,7 @@ jobs:
             end tell
           end tell
           APPLESCRIPT
-          STAGE2_EXIT=$?
-          echo "Stage 2 exit: $STAGE2_EXIT"
-          [ -s /tmp/osascript-stage2.err ] && echo "Stage 2 error: $(cat /tmp/osascript-stage2.err)"
-
-          rm -f /tmp/.dia-pass
+          echo "Stage 2 done"
 
           echo "Signup submitted. Capturing 30s of network traffic..."
           sleep 30
