@@ -29,7 +29,7 @@ jobs:
         run: |
           brew install mitmproxy
           python3 -m venv /tmp/agentmail-venv
-          /tmp/agentmail-venv/bin/pip install --quiet agentmail==0.4.15 websockets requests
+          /tmp/agentmail-venv/bin/pip install --quiet agentmail==0.4.15 websocket-client
 
       - name: Generate mitmproxy cert
         run: |
@@ -69,8 +69,9 @@ jobs:
             --ignore-certificate-errors \
             --disable-quic \
             --remote-debugging-port=9222 &
-          echo "Waiting 15s for Dia to render initial screen..."
-          sleep 15
+          echo "Waiting for CDP port 9222 and initial screen..."
+          timeout 30 bash -c 'until nc -z localhost 9222 2>/dev/null; do sleep 1; done' && echo "CDP port ready" || echo "WARNING: CDP port timeout"
+          sleep 12
           screencapture -x /tmp/dia-screenshot-pre-auth.png
 
           # Write password to temp file — avoids embedding in AppleScript source.
@@ -115,129 +116,8 @@ jobs:
           pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
 
           echo "Stage 2: CDP password entry..."
-          cat > /tmp/dia-cdp-signup.py << 'PYEOF'
-import asyncio, json, sys, time, os
-import requests
-import websockets
-
-async def fill_signup_form(password):
-    # Poll CDP /json/list until signup tab is visible (up to 45s)
-    deadline = time.time() + 45
-    ws_url = None
-    tab_url = None
-    while time.time() < deadline:
-        try:
-            tabs = requests.get('http://localhost:9222/json/list', timeout=5).json()
-            for tab in tabs:
-                url = tab.get('url', '')
-                if 'diabrowser.engineering' in url:
-                    ws_url = tab.get('webSocketDebuggerUrl')
-                    tab_url = url
-                    break
-            if ws_url:
-                break
-        except Exception as e:
-            print(f"CDP poll error: {e}", flush=True)
-        time.sleep(3)
-
-    if not ws_url:
-        print("ERROR: Dia signup tab not found via CDP after 45s", flush=True)
-        sys.exit(1)
-
-    print(f"Attaching CDP: {tab_url}", flush=True)
-
-    async with websockets.connect(ws_url, max_size=10_000_000) as ws:
-        cmd_id = 1
-
-        async def cdp(method, params=None):
-            nonlocal cmd_id
-            mid = cmd_id
-            cmd_id += 1
-            await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
-            # drain responses until we get ours (skip events)
-            for _ in range(30):
-                raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                resp = json.loads(raw)
-                if resp.get('id') == mid:
-                    return resp
-            return None
-
-        await cdp("Runtime.enable")
-        await asyncio.sleep(1)
-
-        # Check form is present before filling
-        check_js = "document.querySelectorAll('input[type=\"password\"]').length"
-        check = await cdp("Runtime.evaluate", {"expression": check_js, "returnByValue": True})
-        field_count = check.get('result', {}).get('result', {}).get('value', 0) if check else 0
-        print(f"Password fields found: {field_count}", flush=True)
-        if field_count < 2:
-            print("ERROR: Expected 2 password fields, found fewer — form may not be loaded yet", flush=True)
-            sys.exit(1)
-
-        # Escape password for JS string literal
-        p = password.replace('\\', '\\\\').replace('"', '\\"')
-
-        fill_js = f"""
-(function() {{
-  var inputs = document.querySelectorAll('input[type="password"]');
-  if (inputs.length < 2) return 'ERR:fields=' + inputs.length;
-
-  // React-controlled input: use nativeInputValueSetter so React sees the change
-  var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-
-  function reactSet(el, val) {{
-    el.focus();
-    nativeSetter.call(el, val);
-    el.dispatchEvent(new Event('input',  {{bubbles: true, composed: true}}));
-    el.dispatchEvent(new Event('change', {{bubbles: true, composed: true}}));
-  }}
-
-  reactSet(inputs[0], "{p}");
-  reactSet(inputs[1], "{p}");
-
-  // Ensure ToS checkbox is checked
-  var boxes = document.querySelectorAll('input[type="checkbox"]');
-  var checked = 0;
-  for (var i = 0; i < boxes.length; i++) {{
-    if (!boxes[i].checked) {{ boxes[i].click(); }}
-    checked++;
-  }}
-
-  return 'ok:fields=' + inputs.length + ',boxes=' + checked;
-}})()
-"""
-        fill_result = await cdp("Runtime.evaluate", {"expression": fill_js, "returnByValue": True})
-        val = fill_result.get('result', {}).get('result', {}).get('value', 'no-result') if fill_result else 'no-result'
-        print(f"Fill result: {val}", flush=True)
-        if str(val).startswith('ERR'):
-            print("ERROR: form fill reported error", flush=True)
-            sys.exit(1)
-
-        await asyncio.sleep(1)
-
-        submit_js = """
-(function() {
-  var btns = document.querySelectorAll('button');
-  for (var i = 0; i < btns.length; i++) {
-    if (btns[i].textContent.trim().toLowerCase().includes('sign up')) {
-      btns[i].click();
-      return 'clicked:' + btns[i].textContent.trim();
-    }
-  }
-  var form = document.querySelector('form');
-  if (form) { form.requestSubmit(); return 'form.requestSubmit'; }
-  return 'ERR:no-submit-found';
-})()
-"""
-        sub_result = await cdp("Runtime.evaluate", {"expression": submit_js, "returnByValue": True})
-        sub_val = sub_result.get('result', {}).get('result', {}).get('value', 'no-result') if sub_result else 'no-result'
-        print(f"Submit result: {sub_val}", flush=True)
-
-password = open('/tmp/.dia-pass').read().strip()
-asyncio.run(fill_signup_form(password))
-PYEOF
-          /tmp/agentmail-venv/bin/python3 /tmp/dia-cdp-signup.py
-          rm -f /tmp/.dia-pass /tmp/dia-cdp-signup.py
+          /tmp/agentmail-venv/bin/python3 .github/scripts/dia-cdp-signup.py
+          rm -f /tmp/.dia-pass
           echo "Stage 2 done"
 
           echo "Signup submitted. Capturing 30s of network traffic..."
