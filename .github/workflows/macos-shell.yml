@@ -2,11 +2,8 @@ name: macOS 14 Shell (Dia Testing)
 
 on:
   workflow_dispatch:
-    inputs:
-      timeout_minutes:
-        description: 'Session timeout (minutes)'
-        required: false
-        default: '60'
+  push:
+    branches: [master]
 
 jobs:
   shell:
@@ -20,37 +17,32 @@ jobs:
           uname -m
           sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB RAM"}'
 
-      - name: Install tools
-        run: |
-          brew install mitmproxy
-          brew install --cask dia || true
+      - name: Install mitmproxy
+        run: pip3 install mitmproxy
 
-      - name: Configure mitmproxy cert
+      - name: Configure mitmproxy CA cert
         run: |
-          # Start mitmproxy briefly to generate cert
-          mitmproxy --listen-port 8080 &
+          mitmdump &
           MITM_PID=$!
-          sleep 3
+          sleep 5
           kill $MITM_PID || true
-          # Add cert to system trust
-          sudo security add-trusted-cert -d -r trustRoot \
-            -k /Library/Keychains/System.keychain \
-            ~/.mitmproxy/mitmproxy-ca-cert.pem || echo "cert install attempted"
+          if [ -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; then
+            sudo security add-trusted-cert -d -r trustRoot \
+              -k /Library-Keychains/System.keychain \
+              ~/.mitmproxy/mitmproxy-ca-cert.pem
+            echo "mitmproxy cert installed"
+          else
+            echo "cert not found — mitmproxy may not have initialized"
+          fi
 
-      - name: Set system proxy
+      - name: Set system HTTPS proxy
         run: |
           SERVICE=$(networksetup -listallnetworkservices | grep -v '\*' | head -1)
-          echo "Network service: $SERVICE"
-          sudo networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
-          sudo networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
+          echo "Configuring proxy on: $SERVICE"
+          networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
+          networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
 
-      - name: Interactive shell (tmate)
+      - name: Interactive tmate session
         uses: mxschmitt/action-tmate@v3
-        timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '60') }}
         with:
-          detached: true
-
-      - name: Wait for session
-        run: |
-          echo "tmate session active — check workflow logs for SSH string"
-          sleep $(( ${{ fromJSON(inputs.timeout_minutes || '60') }} * 60 ))
+          limit-access-to-actor: true
