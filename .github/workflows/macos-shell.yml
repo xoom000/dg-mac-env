@@ -115,9 +115,9 @@ jobs:
 
           echo "Stage 2: password keystroke entry..."
           osascript 2>&1 << 'APPLESCRIPT' || true
-          tell application "Dia" to activate
-          delay 2
           set loginPass to (do shell script "cat /tmp/.dia-pass")
+          tell application "Dia" to activate
+          delay 3
           tell application "System Events"
             keystroke loginPass
             delay 0.5
