@@ -5,6 +5,9 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: write
+
 jobs:
   shell:
     runs-on: macos-14
@@ -21,11 +24,11 @@ jobs:
       - name: Install mitmproxy
         run: brew install mitmproxy
 
-      - name: Start tmate and capture SSH string
+      - name: Start tmate and publish SSH string
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Install tmate
           brew install tmate
-          # Start tmate and capture the session info
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH_CONN=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
@@ -33,19 +36,27 @@ jobs:
           echo "=== TMATE SESSION ==="
           echo "SSH: $SSH_CONN"
           echo "WEB: $WEB_URL"
+          # Publish to repo file so we can read it without live logs
+          CONTENT=$(printf "SSH: %s\nWEB: %s\nRUN: %s\n" "$SSH_CONN" "$WEB_URL" "$GITHUB_RUN_ID" | base64)
+          # Check if file exists to get its SHA
+          FILE_SHA=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha',''))" 2>/dev/null || echo "")
+          if [ -n "$FILE_SHA" ]; then
+            SHA_FIELD=",\"sha\":\"$FILE_SHA\""
+          else
+            SHA_FIELD=""
+          fi
+          curl -s -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
+            -d "{\"message\":\"tmate session active\",\"content\":\"$CONTENT\"$SHA_FIELD}" > /dev/null
+          echo "Session info published to repo."
           echo "SSH_CONN=$SSH_CONN" >> "$GITHUB_ENV"
-          echo "WEB_URL=$WEB_URL" >> "$GITHUB_ENV"
-          # Write to step summary
-          echo "## macOS 14 Shell Session" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **SSH:** \`$SSH_CONN\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Web:** $WEB_URL" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Attach to tmate session
+      - name: Hold session open
         run: |
-          echo "Session active. Connect with:"
-          echo "  $SSH_CONN"
-          echo "  Or web: $WEB_URL"
-          # Hold the session open
-          tmate -S /tmp/tmate.sock attach-session -t default || true
-          # Fallback: wait
+          echo "Session: $SSH_CONN"
+          tmate -S /tmp/tmate.sock attach-session -t default 2>/dev/null || true
           sleep 21600
