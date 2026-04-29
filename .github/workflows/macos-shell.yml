@@ -42,7 +42,7 @@ jobs:
           xattr /Applications/Dia.app 2>&1 | grep quarantine && echo "WARNING: quarantine not cleared" || echo "quarantine cleared"
           spctl --status || true
 
-      - name: Capture Dia first-launch traffic
+      - name: Capture Dia auth-flow traffic
         run: |
           mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 &
           MITM_PID=$!
@@ -52,13 +52,35 @@ jobs:
           /Applications/Dia.app/Contents/MacOS/Dia \
             --proxy-server=http://127.0.0.1:8080 \
             --proxy-bypass-list="" \
-            --ignore-certificate-errors &
-          sleep 60
+            --ignore-certificate-errors \
+            --disable-quic &
+          echo "Waiting 15s for Dia to render login screen..."
+          sleep 15
+          screencapture -x /tmp/dia-screenshot-pre-auth.png
+          echo "Simulating email entry + submit..."
+          osascript << 'APPLESCRIPT' || true
+          tell application "System Events"
+            tell process "Dia"
+              set frontmost to true
+              delay 2
+              try
+                set inputField to first text field of front window
+                click inputField
+                delay 1
+              end try
+              keystroke "test@example.com"
+              delay 1
+              key code 36
+            end tell
+          end tell
+          APPLESCRIPT
+          echo "Auth submitted. Capturing 45s of network calls..."
+          sleep 45
           screencapture -x /tmp/dia-screenshot.png
           kill $MITM_PID 2>/dev/null || true
           wait $MITM_PID 2>/dev/null || true
           echo "Capture done."
-          ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot.png
+          ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot-pre-auth.png /tmp/dia-screenshot.png
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -67,5 +89,6 @@ jobs:
           name: dia-runtime-capture
           path: |
             /tmp/dia-traffic.mitm
+            /tmp/dia-screenshot-pre-auth.png
             /tmp/dia-screenshot.png
           retention-days: 3
