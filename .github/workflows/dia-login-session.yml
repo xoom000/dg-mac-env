@@ -106,28 +106,34 @@ jobs:
           echo "Stage 1 done"
 
           # Wait for Dia to check email and show password form
-          echo "Waiting 15s for password form..."
-          sleep 15
+          # /signin/method fires quickly; password form needs ~20s to render
+          echo "Waiting 20s for password form..."
+          sleep 20
           screencapture -x /tmp/dia-login-pre-pass.png
 
           echo "Dia process check before Stage 2..."
           pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
 
           # Stage 2: enter password
-          # Note: interceptor handles React-truncation — osascript delivers 1 char,
-          # interceptor replaces it with full password in-flight on the auth POST.
+          # GOTCHA: read password BEFORE activating Dia — do shell script after activate
+          # steals focus, breaking the keystroke timing.
+          # GOTCHA: interceptor replaces 1-char React-truncated password in-flight.
           echo "Stage 2: entering password..."
           osascript \
+            -e 'set loginPass to (do shell script "cat /tmp/.dia-pass")' \
             -e 'tell application "Dia" to activate' \
-            -e 'delay 3' \
-            -e "tell application \"System Events\" to keystroke \"$DIA_LOGIN_PASSWORD\"" \
-            -e 'delay 0.5' \
-            -e 'tell application "System Events" to key code 36' 2>&1 || true
+            -e 'delay 4' \
+            -e 'tell application "System Events"' \
+            -e '  keystroke loginPass' \
+            -e '  delay 0.5' \
+            -e '  key code 36' \
+            -e 'end tell' 2>&1 || true
           echo "Stage 2 done"
 
           # Wait for login response + Dia main app to load
-          echo "Waiting 30s for login response + main app to appear..."
-          sleep 30
+          # Main app needs ~45s to open after auth: loads browser engine + initial tabs
+          echo "Waiting 45s for login response + main app to appear..."
+          sleep 45
           screencapture -x /tmp/dia-login-post-auth.png
 
           echo "Session capture addon result:"
