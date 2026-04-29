@@ -61,7 +61,7 @@ jobs:
 
       - name: Capture Dia signup flow
         run: |
-          mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 &
+          mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 -s .github/scripts/dia-signup-interceptor.py &
           MITM_PID=$!
           echo "Waiting for mitmdump to start listening..."
           until nc -z 127.0.0.1 8080 2>/dev/null; do sleep 1; done
@@ -119,13 +119,50 @@ jobs:
           echo "Dia process check before Stage 2..."
           pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
 
-          echo "Stage 2: CDP password entry..."
-          /tmp/agentmail-venv/bin/python3 .github/scripts/dia-cdp-signup.py
+          # Stage 2: trigger form submission via osascript.
+          # The mitmproxy interceptor (dia-signup-interceptor.py) catches
+          # POST /signup/start in-flight and replaces the 1-char password
+          # with the full password before it reaches the server.
+          echo "Stage 2: osascript form trigger (interceptor handles password injection)..."
+          osascript 2>&1 << 'APPLESCRIPT' || true
+          set loginPass to (do shell script "cat /tmp/.dia-pass")
+          tell application "Dia" to activate
+          delay 3
+          tell application "System Events"
+            keystroke loginPass
+            delay 0.5
+            key code 48
+            delay 0.3
+            keystroke loginPass
+            delay 0.5
+            key code 48
+            delay 0.3
+            key code 49
+            delay 0.3
+            key code 36
+            delay 1
+          end tell
+          APPLESCRIPT
           rm -f /tmp/.dia-pass
-          echo "Stage 2 done"
+          echo "Stage 2 trigger done"
 
-          echo "Signup submitted. Capturing 30s of network traffic..."
-          sleep 30
+          # Wait for interceptor to fire and capture the response
+          echo "Waiting 20s for interceptor + server response..."
+          sleep 20
+
+          # Check interceptor result
+          if [ -f /tmp/dia-interceptor-result.json ]; then
+            echo "Interceptor result:"
+            cat /tmp/dia-interceptor-result.json
+            # Fail if signup was not successful
+            /tmp/agentmail-venv/bin/python3 -c "import json,sys; r=json.load(open('/tmp/dia-interceptor-result.json')); print('Status:',r.get('response_status'),'Success:',r.get('success')); sys.exit(0 if r.get('success') else 1)"
+          else
+            echo "ERROR: interceptor result file not found — interceptor may not have fired"
+            exit 1
+          fi
+
+          echo "Signup submitted. Capturing 10s of network traffic..."
+          sleep 10
           screencapture -x /tmp/dia-screenshot-post-submit.png
 
           kill $MITM_PID 2>/dev/null || true
