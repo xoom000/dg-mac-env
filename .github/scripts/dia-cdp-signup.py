@@ -6,6 +6,10 @@ Called after Stage 1 (email entry via osascript) has fired and Dia has
 navigated to the "Create your Dia account" form. Fills password fields,
 checks ToS, and clicks Submit via Chrome DevTools Protocol.
 
+Dia sandboxes page targets — /json returns []. We use the browser-level
+WebSocket from /json/version + Target.getTargets + Target.attachToTarget
+to reach the signup webview.
+
 Pattern: Hunter's Approach A (React nativeInputValueSetter).
 Ref: engagements/bcny-2026-04-28/notes/cdp-input-pattern.md
 """
@@ -23,32 +27,80 @@ SIGNUP_URL_PATTERN = "account.diabrowser.engineering"
 
 
 # ---------------------------------------------------------------------------
-# CDP helpers
+# Browser-level CDP helpers
 # ---------------------------------------------------------------------------
 
-def get_targets():
-    url = f"http://localhost:{CDP_PORT}/json"
+def get_browser_ws_url():
+    """Get the browser-level WebSocket URL from /json/version."""
+    url = f"http://localhost:{CDP_PORT}/json/version"
     with urllib.request.urlopen(url, timeout=10) as r:
-        return json.loads(r.read())
+        data = json.loads(r.read())
+    return data.get("webSocketDebuggerUrl") or data.get("Browser")
 
 
-def find_signup_target(targets):
-    """Find the Dia signup webview target."""
-    for t in targets:
-        if SIGNUP_URL_PATTERN in t.get("url", ""):
-            return t
-    # Fallback: first page target that is not devtools
-    for t in targets:
-        if t.get("type") == "page" and "devtools" not in t.get("url", ""):
-            return t
-    return None
+def get_all_targets_via_browser_ws(browser_ws_url):
+    """
+    Connect to the browser-level WS and call Target.getTargets.
+    Returns list of target dicts. Closes the connection immediately.
+    """
+    ws = websocket.create_connection(browser_ws_url, timeout=15)
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            ws.settimeout(deadline - time.time())
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                break
+            msg = json.loads(raw)
+            if msg.get("id") == 1:
+                return msg.get("result", {}).get("targetInfos", [])
+    finally:
+        ws.close()
+    return []
 
 
-def cdp_evaluate(ws, expression, timeout=15):
-    """Send Runtime.evaluate and return the result value."""
+def attach_to_target(browser_ws_url, target_id):
+    """
+    Attach to a target via browser-level WS using Target.attachToTarget.
+    Returns (ws, session_id) — caller must close ws.
+    """
+    ws = websocket.create_connection(browser_ws_url, timeout=15)
+    ws.send(json.dumps({
+        "id": 2,
+        "method": "Target.attachToTarget",
+        "params": {"targetId": target_id, "flatten": True}
+    }))
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        ws.settimeout(deadline - time.time())
+        try:
+            raw = ws.recv()
+        except websocket.WebSocketTimeoutException:
+            break
+        msg = json.loads(raw)
+        if msg.get("id") == 2:
+            session_id = msg.get("result", {}).get("sessionId")
+            if session_id:
+                return ws, session_id
+    ws.close()
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped CDP evaluate
+# ---------------------------------------------------------------------------
+
+def cdp_evaluate_session(ws, session_id, expression, timeout=15):
+    """
+    Send Runtime.evaluate via a session (for targets attached through
+    the browser-level WS). Session messages require the sessionId field.
+    """
     msg_id = int(time.time() * 1000) % 100000
     ws.send(json.dumps({
         "id": msg_id,
+        "sessionId": session_id,
         "method": "Runtime.evaluate",
         "params": {
             "expression": expression,
@@ -58,8 +110,8 @@ def cdp_evaluate(ws, expression, timeout=15):
     }))
     deadline = time.time() + timeout
     while time.time() < deadline:
+        ws.settimeout(deadline - time.time())
         try:
-            ws.settimeout(deadline - time.time())
             raw = ws.recv()
         except websocket.WebSocketTimeoutException:
             break
@@ -70,11 +122,11 @@ def cdp_evaluate(ws, expression, timeout=15):
             if err:
                 print(f"  JS exception: {err}", flush=True)
             return result.get("value")
-    raise TimeoutError(f"CDP evaluate timed out for: {expression[:80]}")
+    raise TimeoutError(f"CDP session evaluate timed out: {expression[:80]}")
 
 
-def fill_react_input(ws, selector, value):
-    """Approach A — React native prototype setter + input event."""
+def fill_react_input(ws, session_id, selector, value):
+    """Approach A — React native prototype setter + input + change events."""
     js = """
 (function() {
     var el = document.querySelector('SELECTOR');
@@ -88,7 +140,7 @@ def fill_react_input(ws, selector, value):
     return 'OK:' + el.name + ':' + el.type;
 })()
 """.replace("SELECTOR", selector).replace("VALUE", json.dumps(value))
-    return cdp_evaluate(ws, js)
+    return cdp_evaluate_session(ws, session_id, js)
 
 
 # ---------------------------------------------------------------------------
@@ -102,51 +154,91 @@ def main():
         sys.exit(1)
     password = open(pass_file).read().strip()
 
-    # --- Discover CDP target (signup form should already be loaded by now) ---
-    print("Discovering CDP targets...", flush=True)
-    targets = None
-    for attempt in range(15):  # up to 30s
+    # --- Get browser-level WS URL ---
+    print("Getting browser WS URL from /json/version...", flush=True)
+    browser_ws_url = None
+    for attempt in range(10):
         try:
-            targets = get_targets()
-            target = find_signup_target(targets)
-            if target:
+            browser_ws_url = get_browser_ws_url()
+            if browser_ws_url:
                 break
-            print(f"  attempt {attempt+1}: no signup target yet — URLs: {[t.get('url','') for t in targets]}", flush=True)
         except Exception as e:
-            print(f"  attempt {attempt+1}: CDP poll error: {e}", flush=True)
+            print(f"  /json/version attempt {attempt+1}: {e}", flush=True)
         time.sleep(2)
-    else:
-        print("ERROR: Dia signup tab not found after 30s", flush=True)
+
+    if not browser_ws_url:
+        print("ERROR: Could not get browser WS URL from /json/version", flush=True)
+        sys.exit(1)
+    print(f"Browser WS: {browser_ws_url}", flush=True)
+
+    # --- Discover signup target via Target.getTargets ---
+    print("Discovering targets via Target.getTargets...", flush=True)
+    target_id = None
+    for attempt in range(20):  # up to 40s
+        try:
+            targets = get_all_targets_via_browser_ws(browser_ws_url)
+            print(f"  attempt {attempt+1}: {len(targets)} targets — {[(t.get('type','?'), t.get('url','')[:60]) for t in targets]}", flush=True)
+            for t in targets:
+                if SIGNUP_URL_PATTERN in t.get("url", ""):
+                    target_id = t["targetId"]
+                    print(f"  Found signup target: {t.get('url')}", flush=True)
+                    break
+            if not target_id:
+                # Fallback: any page/webview that is not devtools/extension
+                for t in targets:
+                    url = t.get("url", "")
+                    ttype = t.get("type", "")
+                    if ttype in ("page", "webview", "iframe") and "devtools" not in url and "extension" not in url and url:
+                        target_id = t["targetId"]
+                        print(f"  Fallback target: {ttype} {url[:60]}", flush=True)
+                        break
+            if target_id:
+                break
+        except Exception as e:
+            print(f"  attempt {attempt+1}: error: {e}", flush=True)
+        time.sleep(2)
+
+    if not target_id:
+        print("ERROR: No suitable target found after 40s", flush=True)
         sys.exit(1)
 
-    ws_url = target["webSocketDebuggerUrl"]
-    print(f"Attaching: {target.get('url', 'unknown')}", flush=True)
+    # --- Attach to target ---
+    print(f"Attaching to target {target_id}...", flush=True)
+    ws, session_id = attach_to_target(browser_ws_url, target_id)
+    if not ws or not session_id:
+        print("ERROR: Failed to attach to target", flush=True)
+        sys.exit(1)
+    print(f"Session: {session_id}", flush=True)
 
-    ws = websocket.create_connection(ws_url, timeout=15)
     try:
-        # Wait for the form to fully render (React hydration)
+        # Wait for React hydration
         time.sleep(3)
 
-        # Confirm password fields present before proceeding
-        field_count = cdp_evaluate(ws, "document.querySelectorAll('input[type=\"password\"]').length")
+        # Confirm password fields present
+        field_count = cdp_evaluate_session(ws, session_id,
+            "document.querySelectorAll('input[type=\"password\"]').length")
         print(f"Password fields visible: {field_count}", flush=True)
         if not field_count or int(field_count) < 2:
-            # One more wait — form may still be transitioning
-            print("  Waiting 5s more for form to settle...", flush=True)
+            print("  Waiting 5s more for form...", flush=True)
             time.sleep(5)
-            field_count = cdp_evaluate(ws, "document.querySelectorAll('input[type=\"password\"]').length")
+            field_count = cdp_evaluate_session(ws, session_id,
+                "document.querySelectorAll('input[type=\"password\"]').length")
             print(f"  Password fields after wait: {field_count}", flush=True)
             if not field_count or int(field_count) < 2:
+                # Dump all inputs for diagnosis
+                all_inputs = cdp_evaluate_session(ws, session_id,
+                    "JSON.stringify(Array.from(document.querySelectorAll('input')).map(e=>({type:e.type,name:e.name,id:e.id,placeholder:e.placeholder})))")
+                print(f"  All inputs on page: {all_inputs}", flush=True)
                 print("ERROR: Expected 2 password fields, aborting", flush=True)
                 sys.exit(1)
 
         # Step 1: Fill password
-        r = fill_react_input(ws, 'input[type="password"]:first-of-type', password)
+        r = fill_react_input(ws, session_id, 'input[type="password"]:first-of-type', password)
         print(f"Password fill: {r}", flush=True)
         time.sleep(0.5)
 
         # Step 2: Fill confirm password
-        r = fill_react_input(ws, 'input[type="password"]:last-of-type', password)
+        r = fill_react_input(ws, session_id, 'input[type="password"]:last-of-type', password)
         print(f"Confirm fill: {r}", flush=True)
         time.sleep(0.5)
 
@@ -162,7 +254,7 @@ def main():
     return 'CHECKED:' + cb.checked;
 })()
 """
-        r = cdp_evaluate(ws, tos_js)
+        r = cdp_evaluate_session(ws, session_id, tos_js)
         print(f"ToS: {r}", flush=True)
         time.sleep(0.5)
 
@@ -179,13 +271,13 @@ def main():
     return 'CLICKED:' + btn.innerText.trim();
 })()
 """
-        r = cdp_evaluate(ws, submit_js)
+        r = cdp_evaluate_session(ws, session_id, submit_js)
         print(f"Submit: {r}", flush=True)
 
         # Wait for post-submit navigation
         time.sleep(5)
 
-        url = cdp_evaluate(ws, "window.location.href")
+        url = cdp_evaluate_session(ws, session_id, "window.location.href")
         print(f"Post-submit URL: {url}", flush=True)
 
     finally:
