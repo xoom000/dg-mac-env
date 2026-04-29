@@ -114,19 +114,28 @@ jobs:
           echo "Dia process check before Stage 2..."
           pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
 
-          # Stage 2: enter password
-          # GOTCHA: read password BEFORE activating Dia — do shell script after activate
-          # steals focus, breaking the keystroke timing.
-          # GOTCHA: interceptor replaces 1-char React-truncated password in-flight.
-          echo "Stage 2: entering password..."
+          # Stage 2: fill signup form (Dia always shows Create Account — same form for existing accounts)
+          # Sequence: Password → Tab → Confirm Password → Tab → ToS checkbox (Space) → Enter
+          # GOTCHA: read password BEFORE activating Dia to avoid do-shell-script focus steal.
+          # GOTCHA: interceptor replaces 1-char React-truncated password on BOTH password fields.
+          echo "Stage 2: filling signup form (password + confirm + ToS + submit)..."
           osascript \
             -e 'set loginPass to (do shell script "cat /tmp/.dia-pass")' \
             -e 'tell application "Dia" to activate' \
-            -e 'delay 4' \
+            -e 'delay 3' \
             -e 'tell application "System Events"' \
             -e '  keystroke loginPass' \
             -e '  delay 0.5' \
+            -e '  key code 48' \
+            -e '  delay 0.3' \
+            -e '  keystroke loginPass' \
+            -e '  delay 0.5' \
+            -e '  key code 48' \
+            -e '  delay 0.3' \
+            -e '  key code 49' \
+            -e '  delay 0.3' \
             -e '  key code 36' \
+            -e '  delay 1' \
             -e 'end tell' 2>&1 || true
           echo "Stage 2 done"
 
