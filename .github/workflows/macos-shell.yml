@@ -17,16 +17,14 @@ jobs:
       - name: Install mitmproxy
         run: brew install mitmproxy
 
-      - name: Generate mitmproxy CA cert
+      - name: Generate mitmproxy cert (no system trust)
         run: |
-          mitmdump --listen-port 8080 &
+          timeout 20 mitmdump --listen-port 8080 &
           MITM_PID=$!
           sleep 8
-          kill $MITM_PID 2>/dev/null || true
+          kill -9 $MITM_PID 2>/dev/null || true
           wait $MITM_PID 2>/dev/null || true
-          sudo security add-trusted-cert -d -r trustRoot \
-            -k /Library/Keychains/System.keychain \
-            ~/.mitmproxy/mitmproxy-ca-cert.pem && echo "cert installed" || echo "cert FAILED"
+          ls -la ~/.mitmproxy/ && echo "cert ready" || echo "cert dir missing"
 
       - name: Configure system proxy
         run: |
