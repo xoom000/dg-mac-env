@@ -16,6 +16,9 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: System info
         run: sw_vers && uname -m && networksetup -listallnetworkservices
 
@@ -70,7 +73,7 @@ jobs:
             --disable-quic \
             --remote-debugging-port=9222 &
           echo "Waiting for CDP port 9222 and initial screen..."
-          timeout 30 bash -c 'until nc -z localhost 9222 2>/dev/null; do sleep 1; done' && echo "CDP port ready" || echo "WARNING: CDP port timeout"
+          i=0; while ! nc -z localhost 9222 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "CDP port ready (waited ${i}s)"
           sleep 12
           screencapture -x /tmp/dia-screenshot-pre-auth.png
 
