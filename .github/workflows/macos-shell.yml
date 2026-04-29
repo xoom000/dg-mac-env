@@ -19,7 +19,6 @@ jobs:
           echo "=== SYSTEM ==="
           sw_vers
           uname -m
-          sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB RAM"}'
           echo "=== NETWORK INTERFACES ==="
           networksetup -listallnetworkservices
 
@@ -28,7 +27,6 @@ jobs:
 
       - name: Configure mitmproxy CA cert
         run: |
-          # mitmdump is non-interactive — safe in CI, generates cert on first run
           mitmdump --listen-port 8080 &
           MITM_PID=$!
           sleep 6
@@ -38,26 +36,23 @@ jobs:
             sudo security add-trusted-cert -d -r trustRoot \
               -k /Library/Keychains/System.keychain \
               ~/.mitmproxy/mitmproxy-ca-cert.pem
-            echo "mitmproxy CA cert installed to system trust store"
+            echo "CA cert installed"
           else
-            echo "WARNING: cert not found — mitmdump may need more time"
+            echo "WARNING: cert not found"
           fi
 
       - name: Configure system proxy
         run: |
-          # Auto-detect first active network service (GH Actions runners have no Wi-Fi)
           SERVICE=$(networksetup -listallnetworkservices | grep -v '^\*' | grep -v 'An asterisk' | head -1 | tr -d '\r')
-          echo "Detected network service: '$SERVICE'"
-          networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
-          networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
-          echo "Proxy set on: $SERVICE"
-          # Verify
+          echo "Network service: '$SERVICE'"
+          sudo networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
+          sudo networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
+          echo "Proxy configured."
           networksetup -getwebproxy "$SERVICE"
           networksetup -getsecurewebproxy "$SERVICE"
 
       - name: Download Dia DMG
         run: |
-          echo "Downloading Dia..."
           curl -L --progress-bar \
             https://releases.diabrowser.com/release/Dia-latest.dmg \
             -o /tmp/Dia.dmg
@@ -71,9 +66,9 @@ jobs:
           tmate -S /tmp/tmate.sock wait tmate-ready
           SSH_CONN=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          echo "=== TMATE SESSION ==="
           echo "SSH: $SSH_CONN"
           echo "WEB: $WEB_URL"
+          # Publish with run ID so poller can verify freshness
           CONTENT=$(printf "SSH: %s\nWEB: %s\nRUN: %s\n" "$SSH_CONN" "$WEB_URL" "$GITHUB_RUN_ID" | base64)
           FILE_SHA=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
@@ -85,14 +80,12 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
             -d "{\"message\":\"tmate session active\",\"content\":\"$CONTENT\"$SHA_FIELD}" > /dev/null
-          echo "Session info published."
+          echo "Session published."
           echo "SSH_CONN=$SSH_CONN" >> "$GITHUB_ENV"
 
       - name: Hold session open
         run: |
           echo "Ready. Connect: $SSH_CONN"
-          echo "Dia DMG at: /tmp/Dia.dmg"
-          echo "mitmproxy: mitmdump -w /tmp/dia-traffic.mitm &"
-          echo "Launch Dia: hdiutil attach /tmp/Dia.dmg -quiet && cp -R /Volumes/Dia*/Dia.app /Applications/ && open /Applications/Dia.app"
-          tmate -S /tmp/tmate.sock attach-session -t default 2>/dev/null || true
-          sleep 21600
+          echo "Dia at: /tmp/Dia.dmg"
+          # tmate -F keeps tmate in foreground — more reliable than background + sleep
+          tmate -S /tmp/tmate.sock -F
