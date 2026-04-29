@@ -87,5 +87,10 @@ jobs:
         run: |
           echo "Ready. Connect: $SSH_CONN"
           echo "Dia at: /tmp/Dia.dmg"
-          # tmate -F keeps tmate in foreground — more reliable than background + sleep
-          tmate -S /tmp/tmate.sock -F
+          # tmate daemon is already running in background from new-session -d.
+          # Just keep this step (and the runner) alive. Loop is safer than bare sleep
+          # since it verifies the daemon is still present every 30s.
+          while tmate -S /tmp/tmate.sock has-session 2>/dev/null; do
+            sleep 30
+          done
+          echo "tmate session ended — job complete"
