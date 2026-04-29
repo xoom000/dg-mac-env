@@ -207,8 +207,11 @@ jobs:
           except Exception as e:
               print(f"Baseline fetch failed: {e}")
 
+          # Initial backoff — avoids hammering the API right after the baseline fetch
+          print("Waiting 30s before first poll...")
+          time.sleep(30)
+
           while time.time() < deadline:
-              time.sleep(10)
               try:
                   result = client.inboxes.messages.list(inbox_id)
                   for msg in (result.messages or []):
@@ -250,6 +253,7 @@ jobs:
                   print(f"Poll error: {e}")
               if magic_url or verify_code:
                   break
+              time.sleep(30)  # 30s between polls — avoids rate limiting
 
           if magic_url:
               with open('/tmp/magic_link.txt', 'w') as f:
