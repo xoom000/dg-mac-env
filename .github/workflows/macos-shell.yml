@@ -28,7 +28,8 @@ jobs:
       - name: Install mitmproxy + agentmail
         run: |
           brew install mitmproxy
-          pip3 install agentmail==0.4.15
+          python3 -m venv /tmp/agentmail-venv
+          /tmp/agentmail-venv/bin/pip install --quiet agentmail==0.4.15
 
       - name: Generate mitmproxy cert
         run: |
@@ -73,7 +74,7 @@ jobs:
 
           # Write osascript to file — safe substitution of env vars at write time,
           # not at heredoc parse time. Password never appears in logs (masked above).
-          python3 - << 'PYEOF'
+          /tmp/agentmail-venv/bin/python3 - << 'PYEOF'
           import os, sys
           email = os.environ['DIA_LOGIN_EMAIL']
           password = os.environ['DIA_LOGIN_PASSWORD']
@@ -195,7 +196,7 @@ jobs:
 
       - name: Poll AgentMail for verification email
         run: |
-          python3 - << 'PYEOF'
+          /tmp/agentmail-venv/bin/python3 - << 'PYEOF'
           import os, sys, time, re, fnmatch
 
           try:
