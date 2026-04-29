@@ -1,21 +1,34 @@
-name: macOS 14 — Dia Runtime Capture
+name: macOS 14 — Dia Signup Provisioning
 
 on:
   workflow_dispatch:
   push:
     branches: [master]
 
+env:
+  DIA_LOGIN_EMAIL: ${{ secrets.DIA_LOGIN_EMAIL }}
+  DIA_LOGIN_PASSWORD: ${{ secrets.DIA_LOGIN_PASSWORD }}
+  AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
+
 jobs:
   capture:
     runs-on: macos-14
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: System info
         run: sw_vers && uname -m && networksetup -listallnetworkservices
 
-      - name: Install mitmproxy
-        run: brew install mitmproxy
+      - name: Mask secrets in log
+        run: |
+          echo "::add-mask::$DIA_LOGIN_EMAIL"
+          echo "::add-mask::$DIA_LOGIN_PASSWORD"
+          echo "::add-mask::$AGENTMAIL_API_KEY"
+
+      - name: Install mitmproxy + agentmail
+        run: |
+          brew install mitmproxy
+          pip3 install agentmail==0.4.15
 
       - name: Generate mitmproxy cert
         run: |
@@ -42,7 +55,7 @@ jobs:
           xattr /Applications/Dia.app 2>&1 | grep quarantine && echo "WARNING: quarantine not cleared" || echo "quarantine cleared"
           spctl --status || true
 
-      - name: Capture Dia auth-flow traffic
+      - name: Capture Dia signup flow
         run: |
           mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 &
           MITM_PID=$!
@@ -54,41 +67,225 @@ jobs:
             --proxy-bypass-list="" \
             --ignore-certificate-errors \
             --disable-quic &
-          echo "Waiting 15s for Dia to render login screen..."
+          echo "Waiting 15s for Dia to render initial screen..."
           sleep 15
           screencapture -x /tmp/dia-screenshot-pre-auth.png
-          echo "Simulating email entry + submit..."
-          osascript << 'APPLESCRIPT' || true
+
+          # Write osascript to file — safe substitution of env vars at write time,
+          # not at heredoc parse time. Password never appears in logs (masked above).
+          python3 - << 'PYEOF'
+          import os, sys
+          email = os.environ['DIA_LOGIN_EMAIL']
+          password = os.environ['DIA_LOGIN_PASSWORD']
+          # Escape single quotes for AppleScript string literals
+          email_esc = email.replace('"', '\\"')
+          pass_esc  = password.replace('"', '\\"')
+          script = f'''
           tell application "System Events"
             tell process "Dia"
               set frontmost to true
               delay 2
+
+              -- Stage 1: Enter email on initial auth form
               try
                 set inputField to first text field of front window
                 click inputField
-                delay 1
+                delay 0.5
               end try
-              keystroke "test@example.com"
+              keystroke "{email_esc}"
               delay 1
               key code 36
+
+              -- Wait for signin/method response + signup form render
+              delay 12
+
+              -- Screenshot after email submit (stage 2 form)
+              do shell script "screencapture -x /tmp/dia-signup-stage2.png"
+
+              -- Stage 2: Fill password fields
+              -- Password inputs are "secure text field" in AppleScript accessibility
+              set passFields to {{}}
+              try
+                set passFields to every secure text field of front window
+              end try
+
+              if (count of passFields) >= 1 then
+                click (item 1 of passFields)
+                delay 0.5
+                keystroke "{pass_esc}"
+              else
+                -- Fallback: Tab from current focus into password field
+                key code 48
+                delay 0.5
+                keystroke "{pass_esc}"
+              end if
+
+              -- Confirm-password field
+              if (count of passFields) >= 2 then
+                click (item 2 of passFields)
+                delay 0.5
+                keystroke "{pass_esc}"
+              else
+                key code 48
+                delay 0.5
+                keystroke "{pass_esc}"
+              end if
+
+              delay 0.5
+
+              -- ToS checkbox: try accessibility first, then Tab+Space fallback
+              set didCheck to false
+              try
+                set allChecks to every checkbox of front window
+                if (count of allChecks) >= 1 then
+                  click (item 1 of allChecks)
+                  set didCheck to true
+                  delay 0.3
+                end if
+              end try
+              if not didCheck then
+                key code 48
+                delay 0.3
+                key code 49
+                delay 0.3
+              end if
+
+              -- Submit signup form
+              key code 36
+              delay 2
+
+              -- Belt-and-suspenders: click any visible Sign Up / Create Account button
+              try
+                set btns to every button of front window
+                repeat with btn in btns
+                  set bTitle to ""
+                  try
+                    set bTitle to description of btn
+                  end try
+                  try
+                    set bTitle to bTitle & (title of btn)
+                  end try
+                  if bTitle contains "Sign Up" or bTitle contains "Create" or bTitle contains "sign up" then
+                    click btn
+                    exit repeat
+                  end if
+                end repeat
+              end try
+
             end tell
           end tell
-          APPLESCRIPT
-          echo "Auth submitted. Capturing 45s of network calls..."
-          sleep 45
-          screencapture -x /tmp/dia-screenshot.png
+          '''
+          with open('/tmp/dia-signup.applescript', 'w') as f:
+              f.write(script)
+          print("AppleScript written to /tmp/dia-signup.applescript")
+          PYEOF
+
+          echo "Running signup osascript..."
+          osascript /tmp/dia-signup.applescript || true
+
+          echo "Signup submitted. Capturing 30s of network traffic..."
+          sleep 30
+          screencapture -x /tmp/dia-screenshot-post-submit.png
+
           kill $MITM_PID 2>/dev/null || true
           wait $MITM_PID 2>/dev/null || true
           echo "Capture done."
-          ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot-pre-auth.png /tmp/dia-screenshot.png
+          ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot-pre-auth.png \
+                  /tmp/dia-signup-stage2.png /tmp/dia-screenshot-post-submit.png 2>/dev/null || true
+
+      - name: Poll AgentMail for verification email
+        run: |
+          python3 - << 'PYEOF'
+          import os, sys, time, re, fnmatch
+
+          try:
+              from agentmail import AgentMail
+          except ImportError:
+              print("agentmail not installed — skipping magic-link poll")
+              sys.exit(0)
+
+          api_key  = os.environ.get('AGENTMAIL_API_KEY', '')
+          inbox_id = 'dg-h1-forward@agentmail.to'
+          pattern  = '*bcny-dia-prod*'
+          deadline = time.time() + 300  # 5-min hard cap
+
+          if not api_key:
+              print("AGENTMAIL_API_KEY not set — skipping magic-link poll")
+              sys.exit(0)
+
+          client = AgentMail(api_key=api_key)
+          print(f"Polling {inbox_id} for pattern {pattern} (5-min cap)...")
+
+          magic_url  = None
+          seen_ids   = set()
+
+          # Baseline — ignore messages already in inbox before this run
+          try:
+              baseline = client.inboxes.messages.list(inbox_id)
+              for m in (baseline.messages or []):
+                  seen_ids.add(m.message_id)
+              print(f"Baseline: {len(seen_ids)} pre-existing messages skipped")
+          except Exception as e:
+              print(f"Baseline fetch failed: {e}")
+
+          while time.time() < deadline:
+              time.sleep(10)
+              try:
+                  result = client.inboxes.messages.list(inbox_id)
+                  for msg in (result.messages or []):
+                      if msg.message_id in seen_ids:
+                          continue
+                      seen_ids.add(msg.message_id)
+                      to_addr = getattr(msg, 'to_', None) or getattr(msg, 'to', '') or ''
+                      if not fnmatch.fnmatch(str(to_addr), pattern):
+                          continue
+                      print(f"Matched message: id={msg.message_id} to={to_addr}")
+                      body = getattr(msg, 'text_body', '') or getattr(msg, 'html_body', '') or ''
+                      urls = re.findall(r'https?://[^\s<>"\']+', body)
+                      for url in urls:
+                          url_lower = url.lower()
+                          if any(k in url_lower for k in ['verify', 'confirm', 'magic', 'account.diabrowser', 'token', 'activate']):
+                              magic_url = url
+                              print(f"Magic link found")
+                              break
+                      if magic_url:
+                          break
+              except Exception as e:
+                  print(f"Poll error: {e}")
+              if magic_url:
+                  break
+
+          if magic_url:
+              with open('/tmp/magic_link.txt', 'w') as f:
+                  f.write(magic_url)
+              print("Magic link written to /tmp/magic_link.txt")
+          else:
+              print("No magic link found within 5 min — flow may not require email verification")
+          PYEOF
+
+      - name: Open magic link in Dia (if received)
+        run: |
+          if [ -f /tmp/magic_link.txt ]; then
+            echo "::add-mask::$(cat /tmp/magic_link.txt)"
+            MAGIC_URL=$(cat /tmp/magic_link.txt)
+            echo "Opening magic link in Dia..."
+            open "$MAGIC_URL"
+            sleep 15
+            screencapture -x /tmp/dia-post-verify.png
+            echo "Post-verify screenshot captured"
+          else
+            echo "No magic link file — skipping"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dia-runtime-capture
+          name: dia-signup-capture
           path: |
             /tmp/dia-traffic.mitm
             /tmp/dia-screenshot-pre-auth.png
-            /tmp/dia-screenshot.png
+            /tmp/dia-signup-stage2.png
+            /tmp/dia-screenshot-post-submit.png
+            /tmp/dia-post-verify.png
           retention-days: 3
