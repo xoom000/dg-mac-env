@@ -51,7 +51,8 @@ jobs:
           echo "mitmdump ready. Launching Dia..."
           /Applications/Dia.app/Contents/MacOS/Dia \
             --proxy-server=http://127.0.0.1:8080 \
-            --proxy-bypass-list="" &
+            --proxy-bypass-list="" \
+            --ignore-certificate-errors &
           sleep 60
           screencapture -x /tmp/dia-screenshot.png
           kill $MITM_PID 2>/dev/null || true
