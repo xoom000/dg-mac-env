@@ -270,15 +270,12 @@ jobs:
             echo "Verification code found. Entering in Dia..."
             pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
             screencapture -x /tmp/dia-pre-code-entry.png
-            osascript 2>&1 << APPLESCRIPT || true
-            tell application "Dia" to activate
-            delay 3
-            tell application "System Events"
-              keystroke "$VCODE"
-              delay 0.5
-              key code 36
-            end tell
-            APPLESCRIPT
+            osascript \
+              -e 'tell application "Dia" to activate' \
+              -e 'delay 3' \
+              -e "tell application \"System Events\" to keystroke \"$VCODE\"" \
+              -e 'delay 0.5' \
+              -e 'tell application "System Events" to key code 36' 2>&1 || true
             echo "Code entered. Waiting 15s for verification response..."
             sleep 15
             screencapture -x /tmp/dia-post-verify.png
