@@ -171,7 +171,7 @@ jobs:
           ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot-pre-auth.png \
                   /tmp/dia-signup-stage2.png /tmp/dia-screenshot-post-submit.png 2>/dev/null || true
 
-      - name: Poll AgentMail for verification email
+      - name: Poll AgentMail for verification code or magic link
         run: |
           /tmp/agentmail-venv/bin/python3 - << 'PYEOF'
           import os, sys, time, re, fnmatch
@@ -179,7 +179,7 @@ jobs:
           try:
               from agentmail import AgentMail
           except ImportError:
-              print("agentmail not installed — skipping magic-link poll")
+              print("agentmail not installed — skipping poll")
               sys.exit(0)
 
           api_key  = os.environ.get('AGENTMAIL_API_KEY', '')
@@ -188,14 +188,15 @@ jobs:
           deadline = time.time() + 300  # 5-min hard cap
 
           if not api_key:
-              print("AGENTMAIL_API_KEY not set — skipping magic-link poll")
+              print("AGENTMAIL_API_KEY not set — skipping poll")
               sys.exit(0)
 
           client = AgentMail(api_key=api_key)
           print(f"Polling {inbox_id} for pattern {pattern} (5-min cap)...")
 
-          magic_url  = None
-          seen_ids   = set()
+          magic_url   = None
+          verify_code = None
+          seen_ids    = set()
 
           # Baseline — ignore messages already in inbox before this run
           try:
@@ -218,32 +219,71 @@ jobs:
                       if not fnmatch.fnmatch(str(to_addr), pattern):
                           continue
                       print(f"Matched message: id={msg.message_id} to={to_addr}")
-                      body = getattr(msg, 'text_body', '') or getattr(msg, 'html_body', '') or ''
+                      # Fetch full message — body is in .html not .text_body for Dia emails
+                      try:
+                          full = client.inboxes.messages.get(inbox_id, msg.message_id)
+                      except Exception as e:
+                          print(f"Full fetch failed: {e}")
+                          full = msg
+                      body = (getattr(full, 'html', '') or
+                              getattr(full, 'text_body', '') or
+                              getattr(full, 'html_body', '') or
+                              getattr(msg, 'text_body', '') or '')
+                      # Strip HTML tags for cleaner regex
+                      clean_body = re.sub(r'<[^>]+>', ' ', body)
+                      # Check for magic link
                       urls = re.findall(r'https?://[^\s<>"\']+', body)
                       for url in urls:
-                          url_lower = url.lower()
-                          if any(k in url_lower for k in ['verify', 'confirm', 'magic', 'account.diabrowser', 'token', 'activate']):
+                          if any(k in url.lower() for k in ['verify', 'confirm', 'magic', 'account.diabrowser', 'token', 'activate']):
                               magic_url = url
                               print(f"Magic link found")
                               break
-                      if magic_url:
+                      # Check for 6-digit verification code
+                      if not magic_url:
+                          codes = re.findall(r'\b\d{6}\b', clean_body)
+                          if codes:
+                              verify_code = codes[0]
+                              print(f"Verification code found: {verify_code}")
+                      if magic_url or verify_code:
                           break
               except Exception as e:
                   print(f"Poll error: {e}")
-              if magic_url:
+              if magic_url or verify_code:
                   break
 
           if magic_url:
               with open('/tmp/magic_link.txt', 'w') as f:
                   f.write(magic_url)
               print("Magic link written to /tmp/magic_link.txt")
+          elif verify_code:
+              with open('/tmp/verify_code.txt', 'w') as f:
+                  f.write(verify_code)
+              print(f"Verification code written to /tmp/verify_code.txt")
           else:
-              print("No magic link found within 5 min — flow may not require email verification")
+              print("No verification received within 5 min")
           PYEOF
 
-      - name: Open magic link in Dia (if received)
+      - name: Enter verification code or open magic link in Dia
         run: |
-          if [ -f /tmp/magic_link.txt ]; then
+          if [ -f /tmp/verify_code.txt ]; then
+            VCODE=$(cat /tmp/verify_code.txt)
+            echo "Verification code found. Entering in Dia..."
+            pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
+            screencapture -x /tmp/dia-pre-code-entry.png
+            osascript 2>&1 << APPLESCRIPT || true
+            tell application "Dia" to activate
+            delay 3
+            tell application "System Events"
+              keystroke "$VCODE"
+              delay 0.5
+              key code 36
+            end tell
+            APPLESCRIPT
+            echo "Code entered. Waiting 15s for verification response..."
+            sleep 15
+            screencapture -x /tmp/dia-post-verify.png
+            echo "Post-verify screenshot captured"
+          elif [ -f /tmp/magic_link.txt ]; then
             echo "::add-mask::$(cat /tmp/magic_link.txt)"
             MAGIC_URL=$(cat /tmp/magic_link.txt)
             echo "Opening magic link in Dia..."
@@ -252,7 +292,7 @@ jobs:
             screencapture -x /tmp/dia-post-verify.png
             echo "Post-verify screenshot captured"
           else
-            echo "No magic link file — skipping"
+            echo "No verification code or magic link — skipping"
           fi
 
       - name: Upload artifacts
@@ -265,5 +305,7 @@ jobs:
             /tmp/dia-screenshot-pre-auth.png
             /tmp/dia-signup-stage2.png
             /tmp/dia-screenshot-post-submit.png
+            /tmp/dia-pre-code-entry.png
             /tmp/dia-post-verify.png
+            /tmp/dia-interceptor-result.json
           retention-days: 3
