@@ -146,13 +146,27 @@ jobs:
           sleep 8
           screencapture -x /tmp/dia-login-post-409.png
 
-          # Stage 3: click "I already have an account" link (~302,343 from screenshot)
-          echo "Stage 3: clicking 'I already have an account'..."
+          # Stage 3: navigate to login form via keyboard.
+          # GOTCHA: click at {x,y} without tell process "Dia" hits whatever window is at those
+          # absolute coordinates — may land on Finder if it has a window there.
+          # Fix: use tell process "Dia" + Shift+Tab to navigate backward from "Sign up" button.
+          # Tab order from bottom: Sign up → ← Use a different email → I already have an account
+          # Shift+Tab x3 covers variants where error message "sign in" link is also focusable.
+          echo "Stage 3: Shift+Tab navigation to 'I already have an account' link..."
           osascript \
-            -e 'tell application "Dia" to activate' \
-            -e 'delay 2' \
             -e 'tell application "System Events"' \
-            -e '  click at {302, 343}' \
+            -e '  tell process "Dia"' \
+            -e '    set frontmost to true' \
+            -e '    delay 3' \
+            -e '    key code 48 using {shift down}' \
+            -e '    delay 0.4' \
+            -e '    key code 48 using {shift down}' \
+            -e '    delay 0.4' \
+            -e '    key code 48 using {shift down}' \
+            -e '    delay 0.4' \
+            -e '    key code 36' \
+            -e '    delay 1' \
+            -e '  end tell' \
             -e 'end tell' 2>&1 || true
           echo "Stage 3 done"
 
