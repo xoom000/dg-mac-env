@@ -72,90 +72,74 @@ jobs:
           sleep 15
           screencapture -x /tmp/dia-screenshot-pre-auth.png
 
-          # Write osascript to file — safe substitution of env vars at write time,
-          # not at heredoc parse time. Password never appears in logs (masked above).
-          /tmp/agentmail-venv/bin/python3 - << 'PYEOF'
-          import os, sys
-          email = os.environ['DIA_LOGIN_EMAIL']
-          password = os.environ['DIA_LOGIN_PASSWORD']
-          # Escape single quotes for AppleScript string literals
-          email_esc = email.replace('"', '\\"')
-          pass_esc  = password.replace('"', '\\"')
-          script = f'''
+          # Write password to temp file — avoids embedding in AppleScript source.
+          # AppleScript doesn't support backslash escaping; temp file sidesteps that entirely.
+          printf '%s' "$DIA_LOGIN_PASSWORD" > /tmp/.dia-pass
+          chmod 600 /tmp/.dia-pass
+
+          echo "Checking Dia process..."
+          pgrep -x Dia && echo "Dia is running" || echo "WARNING: Dia not found by pgrep"
+
+          echo "Stage 1: email entry..."
+          osascript 2>/tmp/osascript-stage1.err << 'APPLESCRIPT'
           tell application "System Events"
             tell process "Dia"
               set frontmost to true
               delay 2
-
-              -- Stage 1: Enter email on initial auth form
               try
                 set inputField to first text field of front window
                 click inputField
                 delay 0.5
               end try
-              keystroke "{email_esc}"
+              keystroke "digitalgnosis+bcny-dia-prod@wearehackerone.com"
               delay 1
               key code 36
+            end tell
+          end tell
+          APPLESCRIPT
+          STAGE1_EXIT=$?
+          echo "Stage 1 exit: $STAGE1_EXIT"
+          [ -s /tmp/osascript-stage1.err ] && echo "Stage 1 error: $(cat /tmp/osascript-stage1.err)"
 
-              -- Wait for signin/method response + signup form render
-              delay 12
+          echo "Waiting 15s for signin/method response + password form..."
+          sleep 15
+          screencapture -x /tmp/dia-signup-stage2.png
 
-              -- Screenshot after email submit (stage 2 form)
-              do shell script "screencapture -x /tmp/dia-signup-stage2.png"
-
-              -- Stage 2: Fill password fields
-              -- Password inputs are "secure text field" in AppleScript accessibility
-              set passFields to {{}}
+          echo "Stage 2: password entry..."
+          osascript 2>/tmp/osascript-stage2.err << 'APPLESCRIPT'
+          tell application "System Events"
+            tell process "Dia"
+              set frontmost to true
+              delay 1
+              set loginPass to (do shell script "cat /tmp/.dia-pass")
+              -- Fill first secure text field (password)
+              set passFields to {}
               try
                 set passFields to every secure text field of front window
               end try
-
               if (count of passFields) >= 1 then
                 click (item 1 of passFields)
                 delay 0.5
-                keystroke "{pass_esc}"
+                keystroke loginPass
               else
-                -- Fallback: Tab from current focus into password field
                 key code 48
                 delay 0.5
-                keystroke "{pass_esc}"
+                keystroke loginPass
               end if
-
-              -- Confirm-password field
+              -- Fill second secure text field (confirm password)
               if (count of passFields) >= 2 then
                 click (item 2 of passFields)
                 delay 0.5
-                keystroke "{pass_esc}"
+                keystroke loginPass
               else
                 key code 48
                 delay 0.5
-                keystroke "{pass_esc}"
+                keystroke loginPass
               end if
-
               delay 0.5
-
-              -- ToS checkbox: try accessibility first, then Tab+Space fallback
-              set didCheck to false
-              try
-                set allChecks to every checkbox of front window
-                if (count of allChecks) >= 1 then
-                  click (item 1 of allChecks)
-                  set didCheck to true
-                  delay 0.3
-                end if
-              end try
-              if not didCheck then
-                key code 48
-                delay 0.3
-                key code 49
-                delay 0.3
-              end if
-
-              -- Submit signup form
+              -- Submit: Return key, then belt-and-suspenders button click
               key code 36
               delay 2
-
-              -- Belt-and-suspenders: click any visible Sign Up / Create Account button
               try
                 set btns to every button of front window
                 repeat with btn in btns
@@ -163,26 +147,20 @@ jobs:
                   try
                     set bTitle to description of btn
                   end try
-                  try
-                    set bTitle to bTitle & (title of btn)
-                  end try
-                  if bTitle contains "Sign Up" or bTitle contains "Create" or bTitle contains "sign up" then
+                  if bTitle contains "Next" or bTitle contains "Create" or bTitle contains "Sign" then
                     click btn
                     exit repeat
                   end if
                 end repeat
               end try
-
             end tell
           end tell
-          '''
-          with open('/tmp/dia-signup.applescript', 'w') as f:
-              f.write(script)
-          print("AppleScript written to /tmp/dia-signup.applescript")
-          PYEOF
+          APPLESCRIPT
+          STAGE2_EXIT=$?
+          echo "Stage 2 exit: $STAGE2_EXIT"
+          [ -s /tmp/osascript-stage2.err ] && echo "Stage 2 error: $(cat /tmp/osascript-stage2.err)"
 
-          echo "Running signup osascript..."
-          osascript /tmp/dia-signup.applescript || true
+          rm -f /tmp/.dia-pass
 
           echo "Signup submitted. Capturing 30s of network traffic..."
           sleep 30
