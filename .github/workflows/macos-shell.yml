@@ -71,7 +71,8 @@ jobs:
             --proxy-bypass-list="" \
             --ignore-certificate-errors \
             --disable-quic \
-            --remote-debugging-port=9222 &
+            --remote-debugging-port=9222 \
+            --remote-allow-origins=* &
           echo "Waiting for CDP port 9222 and initial screen..."
           i=0; while ! nc -z localhost 9222 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo "CDP port ready (waited ${i}s)"
           sleep 12
