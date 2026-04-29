@@ -40,7 +40,7 @@ jobs:
           xattr -dr com.apple.quarantine /Applications/Dia.app
           sudo spctl --master-disable
           xattr /Applications/Dia.app 2>&1 | grep quarantine && echo "WARNING: quarantine not cleared" || echo "quarantine cleared"
-          spctl --status
+          spctl --status || true
 
       - name: Capture Dia first-launch traffic
         run: |
