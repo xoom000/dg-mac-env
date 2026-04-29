@@ -139,9 +139,43 @@ jobs:
             -e 'end tell' 2>&1 || true
           echo "Stage 2 done"
 
-          # Wait for login response + Dia main app to load
-          # Main app needs ~45s to open after auth: loads browser engine + initial tabs
-          echo "Waiting 45s for login response + main app to appear..."
+          # Stage 2 submits signup form → server returns 409 (account exists).
+          # Dia shows "Please try a different email or sign in to your existing account."
+          # The "I already have an account" link is the gateway to the login flow.
+          echo "Waiting 8s for 409 response to render..."
+          sleep 8
+          screencapture -x /tmp/dia-login-post-409.png
+
+          # Stage 3: click "I already have an account" link (~302,343 from screenshot)
+          echo "Stage 3: clicking 'I already have an account'..."
+          osascript \
+            -e 'tell application "Dia" to activate' \
+            -e 'delay 2' \
+            -e 'tell application "System Events"' \
+            -e '  click at {302, 343}' \
+            -e 'end tell' 2>&1 || true
+          echo "Stage 3 done"
+
+          echo "Waiting 12s for login form..."
+          sleep 12
+          screencapture -x /tmp/dia-login-pre-signin.png
+
+          # Stage 4: enter password in login form (single field — no Confirm, no ToS)
+          # Interceptor handles React truncation and captures session cookies.
+          echo "Stage 4: entering password in login form..."
+          osascript \
+            -e 'set loginPass to (do shell script "cat /tmp/.dia-pass")' \
+            -e 'tell application "Dia" to activate' \
+            -e 'delay 3' \
+            -e 'tell application "System Events"' \
+            -e '  keystroke loginPass' \
+            -e '  delay 0.5' \
+            -e '  key code 36' \
+            -e 'end tell' 2>&1 || true
+          echo "Stage 4 done"
+
+          # Wait for main app to load after login
+          echo "Waiting 45s for main app to appear after login..."
           sleep 45
           screencapture -x /tmp/dia-login-post-auth.png
 
@@ -181,5 +215,7 @@ jobs:
             /tmp/dia-session/auth-result.json
             /tmp/dia-login-pre-email.png
             /tmp/dia-login-pre-pass.png
+            /tmp/dia-login-post-409.png
+            /tmp/dia-login-pre-signin.png
             /tmp/dia-login-post-auth.png
           retention-days: 7
