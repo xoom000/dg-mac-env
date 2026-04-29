@@ -18,7 +18,7 @@ jobs:
           sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB RAM"}'
 
       - name: Install mitmproxy
-        run: pip3 install mitmproxy
+        run: brew install mitmproxy
 
       - name: Configure mitmproxy CA cert
         run: |
@@ -28,7 +28,7 @@ jobs:
           kill $MITM_PID || true
           if [ -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; then
             sudo security add-trusted-cert -d -r trustRoot \
-              -k /Library-Keychains/System.keychain \
+              -k /Library/Keychains/System.keychain \
               ~/.mitmproxy/mitmproxy-ca-cert.pem
             echo "mitmproxy cert installed"
           else
