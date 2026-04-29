@@ -46,10 +46,12 @@ jobs:
         run: |
           mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 &
           MITM_PID=$!
-          sleep 3
-          echo "Launching Dia via binary with proxy env vars..."
-          HTTPS_PROXY=http://127.0.0.1:8080 HTTP_PROXY=http://127.0.0.1:8080 \
-            /Applications/Dia.app/Contents/MacOS/Dia &
+          echo "Waiting for mitmdump to start listening..."
+          until nc -z 127.0.0.1 8080 2>/dev/null; do sleep 1; done
+          echo "mitmdump ready. Launching Dia..."
+          /Applications/Dia.app/Contents/MacOS/Dia \
+            --proxy-server=http://127.0.0.1:8080 \
+            --proxy-bypass-list="" &
           sleep 60
           screencapture -x /tmp/dia-screenshot.png
           kill $MITM_PID 2>/dev/null || true
