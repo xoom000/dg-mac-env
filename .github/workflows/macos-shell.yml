@@ -1,0 +1,56 @@
+name: macOS 14 Shell (Dia Testing)
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout_minutes:
+        description: 'Session timeout (minutes)'
+        required: false
+        default: '60'
+
+jobs:
+  shell:
+    runs-on: macos-14
+    timeout-minutes: 360
+
+    steps:
+      - name: System info
+        run: |
+          sw_vers
+          uname -m
+          sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB RAM"}'
+
+      - name: Install tools
+        run: |
+          brew install mitmproxy
+          brew install --cask dia || true
+
+      - name: Configure mitmproxy cert
+        run: |
+          # Start mitmproxy briefly to generate cert
+          mitmproxy --listen-port 8080 &
+          MITM_PID=$!
+          sleep 3
+          kill $MITM_PID || true
+          # Add cert to system trust
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain \
+            ~/.mitmproxy/mitmproxy-ca-cert.pem || echo "cert install attempted"
+
+      - name: Set system proxy
+        run: |
+          SERVICE=$(networksetup -listallnetworkservices | grep -v '\*' | head -1)
+          echo "Network service: $SERVICE"
+          sudo networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
+          sudo networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
+
+      - name: Interactive shell (tmate)
+        uses: mxschmitt/action-tmate@v3
+        timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '60') }}
+        with:
+          detached: true
+
+      - name: Wait for session
+        run: |
+          echo "tmate session active — check workflow logs for SSH string"
+          sleep $(( ${{ fromJSON(inputs.timeout_minutes || '60') }} * 60 ))
