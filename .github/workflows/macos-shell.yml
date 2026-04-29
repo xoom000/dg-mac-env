@@ -103,27 +103,27 @@ jobs:
           sleep 15
           screencapture -x /tmp/dia-signup-stage2.png
 
-          # Put password in clipboard — avoids do shell script and AppleScript
-          # string escaping issues entirely. Cmd+V pastes into focused field.
-          printf '%s' "$DIA_LOGIN_PASSWORD" | pbcopy
+          # Write password to temp file for top-level do shell script read.
+          # do shell script at top level (not inside tell process) works fine on CI.
+          # keystroke variable types the full password into the focused field —
+          # avoids both pbcopy (no pasteboard in CI) and AppleScript string escaping.
+          printf '%s' "$DIA_LOGIN_PASSWORD" > /tmp/.dia-pass
+          chmod 600 /tmp/.dia-pass
 
           echo "Dia process check before Stage 2..."
           pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
 
-          # Stage 2: activate Dia by app bundle, then send bare keystrokes.
-          # Avoids tell process "Dia" which breaks after Dia navigates windows.
-          # After Stage 1 Return, focus lands in the Password field of the
-          # "Create your Dia account" form — paste directly.
-          echo "Stage 2: password entry via Cmd+V paste..."
+          echo "Stage 2: password keystroke entry..."
           osascript 2>&1 << 'APPLESCRIPT' || true
           tell application "Dia" to activate
           delay 2
+          set loginPass to (do shell script "cat /tmp/.dia-pass")
           tell application "System Events"
-            key code 9 using command down
+            keystroke loginPass
             delay 0.5
             key code 48
             delay 0.3
-            key code 9 using command down
+            keystroke loginPass
             delay 0.5
             key code 48
             delay 0.3
@@ -133,6 +133,7 @@ jobs:
             delay 1
           end tell
           APPLESCRIPT
+          rm -f /tmp/.dia-pass
           echo "Stage 2 done"
 
           echo "Signup submitted. Capturing 30s of network traffic..."
