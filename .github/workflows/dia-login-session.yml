@@ -1,0 +1,170 @@
+name: macOS 14 — Dia Login + Session Capture
+
+on:
+  workflow_dispatch:
+
+env:
+  DIA_LOGIN_EMAIL: ${{ secrets.DIA_LOGIN_EMAIL }}
+  DIA_LOGIN_PASSWORD: ${{ secrets.DIA_LOGIN_PASSWORD }}
+
+jobs:
+  capture:
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: System info
+        run: sw_vers && uname -m
+
+      - name: Mask secrets in log
+        run: |
+          echo "::add-mask::$DIA_LOGIN_EMAIL"
+          echo "::add-mask::$DIA_LOGIN_PASSWORD"
+
+      - name: Install mitmproxy + dependencies
+        run: |
+          brew install mitmproxy
+          python3 -m venv /tmp/py-venv
+          /tmp/py-venv/bin/pip install --quiet websocket-client
+
+      - name: Generate mitmproxy cert
+        run: |
+          mitmdump --listen-port 8080 &
+          MITM_PID=$!
+          i=0; while ! nc -z 127.0.0.1 8080 2>/dev/null && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+          kill -9 $MITM_PID 2>/dev/null || true
+          wait $MITM_PID 2>/dev/null || true
+          ls -la ~/.mitmproxy/ && echo "cert ready"
+
+      - name: Download and install Dia
+        run: |
+          curl -L --progress-bar https://releases.diabrowser.com/release/Dia-latest.dmg -o /tmp/Dia.dmg
+          hdiutil attach /tmp/Dia.dmg -quiet -nobrowse
+          DIA_VOL=$(ls /Volumes/ | grep -i dia | head -1)
+          cp -R "/Volumes/$DIA_VOL/Dia.app" /Applications/
+          hdiutil detach "/Volumes/$DIA_VOL" -quiet || true
+          echo "Dia version: $(defaults read /Applications/Dia.app/Contents/Info.plist CFBundleShortVersionString)"
+
+      - name: Bypass Gatekeeper
+        run: |
+          xattr -dr com.apple.quarantine /Applications/Dia.app
+          sudo spctl --master-disable
+          xattr /Applications/Dia.app 2>&1 | grep quarantine && echo "WARNING: quarantine not cleared" || echo "quarantine cleared"
+
+      - name: Launch Dia and complete login
+        run: |
+          mkdir -p /tmp/dia-session
+
+          # Write password to temp file before activating Dia
+          printf '%s' "$DIA_LOGIN_PASSWORD" > /tmp/.dia-pass
+          chmod 600 /tmp/.dia-pass
+
+          # Start mitmproxy with session-capture addon (password injection + cookie harvest)
+          mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 \
+            -s .github/scripts/dia-session-capture.py &
+          MITM_PID=$!
+          echo "Waiting for mitmdump..."
+          until nc -z 127.0.0.1 8080 2>/dev/null; do sleep 1; done
+          echo "mitmdump ready"
+
+          # Launch Dia with proxy + CDP
+          /Applications/Dia.app/Contents/MacOS/Dia \
+            --proxy-server=http://127.0.0.1:8080 \
+            --proxy-bypass-list="" \
+            --ignore-certificate-errors \
+            --disable-quic \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins=* &
+          echo "Dia launched"
+
+          # Wait for CDP port
+          i=0; while ! nc -z localhost 9222 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+          echo "CDP port ready (waited ${i}s)"
+          sleep 12
+          screencapture -x /tmp/dia-login-pre-email.png
+
+          # Stage 1: enter email
+          echo "Stage 1: entering email..."
+          osascript \
+            -e 'tell application "System Events"' \
+            -e '  tell process "Dia"' \
+            -e '    set frontmost to true' \
+            -e '    delay 2' \
+            -e '    try' \
+            -e '      set inputField to first text field of front window' \
+            -e '      click inputField' \
+            -e '      delay 0.5' \
+            -e '    end try' \
+            -e "    keystroke \"$DIA_LOGIN_EMAIL\"" \
+            -e '    delay 1' \
+            -e '    key code 36' \
+            -e '  end tell' \
+            -e 'end tell' 2>&1 || true
+          echo "Stage 1 done"
+
+          # Wait for Dia to check email and show password form
+          echo "Waiting 15s for password form..."
+          sleep 15
+          screencapture -x /tmp/dia-login-pre-pass.png
+
+          echo "Dia process check before Stage 2..."
+          pgrep -x Dia && echo "Dia running" || echo "WARNING: Dia not found"
+
+          # Stage 2: enter password
+          # Note: interceptor handles React-truncation — osascript delivers 1 char,
+          # interceptor replaces it with full password in-flight on the auth POST.
+          echo "Stage 2: entering password..."
+          osascript \
+            -e 'tell application "Dia" to activate' \
+            -e 'delay 3' \
+            -e "tell application \"System Events\" to keystroke \"$DIA_LOGIN_PASSWORD\"" \
+            -e 'delay 0.5' \
+            -e 'tell application "System Events" to key code 36' 2>&1 || true
+          echo "Stage 2 done"
+
+          # Wait for login response + Dia main app to load
+          echo "Waiting 30s for login response + main app to appear..."
+          sleep 30
+          screencapture -x /tmp/dia-login-post-auth.png
+
+          echo "Session capture addon result:"
+          cat /tmp/dia-session/auth-result.json 2>/dev/null || echo "(not written yet)"
+
+          echo "mitmproxy cookies so far:"
+          cat /tmp/dia-session/storage_state.json 2>/dev/null | python3 -c \
+            "import json,sys; s=json.load(sys.stdin); print(f'Cookies: {len(s.get(\"cookies\",[]))}')" 2>/dev/null || true
+
+          # Kill mitmproxy — cookies are already captured
+          kill $MITM_PID 2>/dev/null || true
+          wait $MITM_PID 2>/dev/null || true
+          echo "mitmproxy stopped"
+
+      - name: Extract session via CDP
+        run: |
+          echo "Running CDP extractor..."
+          /tmp/py-venv/bin/python3 .github/scripts/dia-cdp-extract.py
+          echo "CDP extraction done"
+          echo "=== storage_state.json ==="
+          cat /tmp/dia-session/storage_state.json | python3 -c \
+            "import json,sys; s=json.load(sys.stdin); print(f'Cookies: {len(s.get(\"cookies\",[]))}, Origins: {len(s.get(\"origins\",[]))}')"
+          echo "=== auth-tokens.json ==="
+          cat /tmp/dia-session/auth-tokens.json | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(f'Browser cookies: {len(d.get(\"browser_cookies_all\",[]))}, Mitm cookies: {len(d.get(\"mitm_cookies\",[]))}')"
+          ls -lh /tmp/dia-session/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dia-session-state
+          path: |
+            /tmp/dia-session/storage_state.json
+            /tmp/dia-session/auth-tokens.json
+            /tmp/dia-session/auth-result.json
+            /tmp/dia-login-pre-email.png
+            /tmp/dia-login-pre-pass.png
+            /tmp/dia-login-post-auth.png
+          retention-days: 7
