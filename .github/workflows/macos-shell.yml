@@ -232,21 +232,25 @@ jobs:
                               getattr(full, 'text_body', '') or
                               getattr(full, 'html_body', '') or
                               getattr(msg, 'text_body', '') or '')
-                      # Strip HTML tags for cleaner regex
+                      # Strip HTML tags for cleaner text
                       clean_body = re.sub(r'<[^>]+>', ' ', body)
-                      # Check for magic link
-                      urls = re.findall(r'https?://[^\s<>"\']+', body)
-                      for url in urls:
-                          if any(k in url.lower() for k in ['verify', 'confirm', 'magic', 'account.diabrowser', 'token', 'activate']):
-                              magic_url = url
-                              print(f"Magic link found")
-                              break
-                      # Check for 6-digit verification code
-                      if not magic_url:
-                          codes = re.findall(r'\b\d{6}\b', clean_body)
-                          if codes:
-                              verify_code = codes[0]
-                              print(f"Verification code found: {verify_code}")
+                      # Check for 6-digit verification code first (Dia sends codes, not magic links)
+                      codes = re.findall(r'\b\d{6}\b', clean_body)
+                      if codes:
+                          verify_code = codes[0]
+                          print(f"Verification code found: {verify_code}")
+                      else:
+                          # Check for magic link — exclude image files to avoid false matches
+                          IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp')
+                          urls = re.findall(r'https?://[^\s<>"\']+', body)
+                          for url in urls:
+                              url_lower = url.lower()
+                              if any(ext in url_lower for ext in IMAGE_EXTS):
+                                  continue
+                              if any(k in url_lower for k in ['verify', 'confirm', 'magic', 'account.diabrowser', 'token', 'activate']):
+                                  magic_url = url
+                                  print(f"Magic link found: {url[:60]}")
+                                  break
                       if magic_url or verify_code:
                           break
               except Exception as e:
