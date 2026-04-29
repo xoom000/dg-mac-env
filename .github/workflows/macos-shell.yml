@@ -1,96 +1,92 @@
-name: macOS 14 Shell (Dia Testing)
+name: macOS 14 — Dia First-Launch Capture
 
 on:
   workflow_dispatch:
   push:
     branches: [master]
 
-permissions:
-  contents: write
-
 jobs:
-  shell:
+  capture:
     runs-on: macos-14
-    timeout-minutes: 360
+    timeout-minutes: 30
 
     steps:
       - name: System info
         run: |
-          echo "=== SYSTEM ==="
-          sw_vers
-          uname -m
-          echo "=== NETWORK INTERFACES ==="
+          sw_vers && uname -m
           networksetup -listallnetworkservices
 
-      - name: Install tools
-        run: brew install mitmproxy tmate
+      - name: Install mitmproxy
+        run: brew install mitmproxy
 
-      - name: Configure mitmproxy CA cert
+      - name: Generate mitmproxy CA cert
         run: |
+          # mitmdump is non-interactive — generates cert and exits cleanly
           mitmdump --listen-port 8080 &
           MITM_PID=$!
-          sleep 6
+          sleep 8
           kill $MITM_PID 2>/dev/null || true
           wait $MITM_PID 2>/dev/null || true
-          if [ -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; then
-            sudo security add-trusted-cert -d -r trustRoot \
-              -k /Library/Keychains/System.keychain \
-              ~/.mitmproxy/mitmproxy-ca-cert.pem
-            echo "CA cert installed"
-          else
-            echo "WARNING: cert not found"
-          fi
+          ls -la ~/.mitmproxy/
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain \
+            ~/.mitmproxy/mitmproxy-ca-cert.pem
+          echo "Cert installed"
+          security find-certificate -c mitmproxy /Library/Keychains/System.keychain | head -3
 
       - name: Configure system proxy
         run: |
           SERVICE=$(networksetup -listallnetworkservices | grep -v '^\*' | grep -v 'An asterisk' | head -1 | tr -d '\r')
-          echo "Network service: '$SERVICE'"
+          echo "Using service: '$SERVICE'"
           sudo networksetup -setwebproxy "$SERVICE" 127.0.0.1 8080
           sudo networksetup -setsecurewebproxy "$SERVICE" 127.0.0.1 8080
-          echo "Proxy configured."
           networksetup -getwebproxy "$SERVICE"
           networksetup -getsecurewebproxy "$SERVICE"
 
-      - name: Download Dia DMG
+      - name: Download and install Dia
         run: |
           curl -L --progress-bar \
             https://releases.diabrowser.com/release/Dia-latest.dmg \
             -o /tmp/Dia.dmg
-          ls -lh /tmp/Dia.dmg
+          hdiutil attach /tmp/Dia.dmg -quiet -nobrowse
+          DIA_VOL=$(ls /Volumes/ | grep -i dia | head -1)
+          echo "Volume: $DIA_VOL"
+          ls "/Volumes/$DIA_VOL/"
+          cp -R "/Volumes/$DIA_VOL/Dia.app" /Applications/
+          hdiutil detach "/Volumes/$DIA_VOL" -quiet || true
+          ls -la /Applications/Dia.app
 
-      - name: Start tmate and publish SSH string
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Capture Dia first-launch traffic
         run: |
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH_CONN=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          echo "SSH: $SSH_CONN"
-          echo "WEB: $WEB_URL"
-          # Publish with run ID so poller can verify freshness
-          CONTENT=$(printf "SSH: %s\nWEB: %s\nRUN: %s\n" "$SSH_CONN" "$WEB_URL" "$GITHUB_RUN_ID" | base64)
-          FILE_SHA=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha',''))" 2>/dev/null || echo "")
-          SHA_FIELD=""
-          [ -n "$FILE_SHA" ] && SHA_FIELD=",\"sha\":\"$FILE_SHA\""
-          curl -s -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/TMATE_SESSION.txt" \
-            -d "{\"message\":\"tmate session active\",\"content\":\"$CONTENT\"$SHA_FIELD}" > /dev/null
-          echo "Session published."
-          echo "SSH_CONN=$SSH_CONN" >> "$GITHUB_ENV"
+          # Start mitmdump writing to file
+          mitmdump -w /tmp/dia-traffic.mitm --listen-port 8080 &
+          MITM_PID=$!
+          echo "mitmdump PID: $MITM_PID"
+          sleep 3
 
-      - name: Hold session open
-        run: |
-          echo "Ready. Connect: $SSH_CONN"
-          echo "Dia at: /tmp/Dia.dmg"
-          # tmate daemon is already running in background from new-session -d.
-          # Just keep this step (and the runner) alive. Loop is safer than bare sleep
-          # since it verifies the daemon is still present every 30s.
-          while tmate -S /tmp/tmate.sock has-session 2>/dev/null; do
-            sleep 30
-          done
-          echo "tmate session ended — job complete"
+          # Launch Dia
+          echo "Launching Dia..."
+          open -a Dia
+          echo "Dia launched, capturing 90s of traffic..."
+          sleep 90
+
+          # Screenshot
+          screencapture -x /tmp/dia-screenshot.png
+          echo "Screenshot saved"
+
+          # Stop mitmdump
+          kill $MITM_PID 2>/dev/null || true
+          wait $MITM_PID 2>/dev/null || true
+
+          echo "Capture complete."
+          ls -lh /tmp/dia-traffic.mitm /tmp/dia-screenshot.png || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dia-first-launch
+          path: |
+            /tmp/dia-traffic.mitm
+            /tmp/dia-screenshot.png
+          retention-days: 3
